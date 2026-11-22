@@ -374,7 +374,7 @@
       })
       .catch(function () {
         thinking.remove();
-        bubble("I couldn't reach her right now. The Chromebook tabs may be closed or asleep — Kumwai's server and the tunnel both need to be running.", "error");
+        bubble("I couldn't reach her right now. The server or the tunnel may be down — try again in a minute.", "error");
         setStatus(false);
       })
       .finally(function () {
