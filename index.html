@@ -433,7 +433,7 @@
     bytes.forEach(function (b) { bin += String.fromCharCode(b); });
     return btoa(bin);
   }
-  function normWord(w) { return (w || "").trim().toUpperCase(); }
+  function normWord(w) { return (w || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, ""); }
 
   function deriveKey(word, saltBytes) {
     return window.crypto.subtle.importKey("raw", new TextEncoder().encode(word), "PBKDF2", false, ["deriveKey"])
