@@ -221,13 +221,14 @@
     </div>
     <div class="p-pane" id="pane-tools">
       <h3>What I Can Do</h3>
-      <div class="kv"><b>Model</b><span>Qwen 3.8 27B via Groq</span></div>
+      <div class="kv"><b>Model</b><span>Qwen 3 32B via OpenRouter</span></div>
       <div class="kv"><b>Framework</b><span>Mastra + Mem0</span></div>
       <div class="kv"><b>Server</b><span>kumwai.shaethonai.com</span></div>
-      <div class="kv"><b>Home</b><span>Seth's Chromebook</span></div>
+      <div class="kv"><b>Home</b><span>Vultr server</span></div>
       <h3>Tools</h3>
       <ul>
         <li><b>Documents</b> — read and work with docx, pdf, pptx, and xlsx files.</li>
+        <li><b>Web search</b> — search the web and read public pages.</li>
         <li><b>Workspace files</b> — read and write files in her own workspace (permit-gated: Seth approves each write).</li>
         <li><b>Shell</b> — run commands (permit-gated, allowlisted only).</li>
         <li><b>Memory</b> — search and record memory blocks; learn across sessions.</li>
@@ -328,7 +329,7 @@
   function setStatus(live) {
     statusEl.className = live ? "live" : "down";
     statusText.textContent = live ? "Live" : "Offline";
-    pStatus.textContent = live ? "Live — Arise and live." : "Offline — the Chromebook tabs need to be running.";
+    pStatus.textContent = live ? "Live — Arise and live." : "Offline — the server or the tunnel may be down.";
     pStatus.className = "p-status " + (live ? "live" : "down");
   }
 
@@ -349,14 +350,21 @@
     saveHistory();
     bubble(text, "me");
     var thinking = bubble("Kumwai is thinking…", "her thinking");
+    var replyEl = null;
+    var replyText = "";
+    var gotText = false;
 
     // Only send the last few messages, trimmed — sending the whole saved
-    // chat grows past Groq's free-tier cap and every send then fails.
+    // chat grows past the model's per-minute cap and every send then fails.
     var toSend = chatHistory.slice(-6).map(function (m) {
       return { role: m.role, content: String(m.content).slice(0, 1200) };
     });
 
-    fetch(API + "/api/agents/" + AGENT + "/generate", {
+    // Stream the reply instead of waiting for one whole response: the
+    // first bytes arrive in under a second and text flows as she thinks
+    // it, so a long answer never sits silent past the proxy's ~100s
+    // cutoff the way the old single-shot request did.
+    fetch(API + "/api/agents/" + AGENT + "/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -368,19 +376,73 @@
       .then(function (r) {
         if (r.status === 429) throw new Error("rate");
         if (!r.ok) throw new Error("HTTP " + r.status);
-        return r.json();
+        if (!r.body || !r.body.getReader) throw new Error("no stream");
+        var reader = r.body.getReader();
+        var decoder = new TextDecoder();
+        var buf = "";
+        function handleLine(line) {
+          line = line.trim();
+          if (line.indexOf("data:") !== 0) return;
+          var json = line.slice(5).trim();
+          if (!json || json === "[DONE]") return;
+          var evt;
+          try { evt = JSON.parse(json); } catch (e) { return; }
+          var t = evt.type || "";
+          var p = evt.payload || {};
+          if (t === "text-delta" || t === "text") {
+            var chunk = p.text || p.delta || "";
+            if (!chunk) return;
+            if (!gotText) {
+              gotText = true;
+              thinking.remove();
+              replyEl = bubble("", "her");
+            }
+            replyText += chunk;
+            replyEl.textContent = replyText;
+            chatEl.scrollTop = chatEl.scrollHeight;
+          } else if (t === "tool-call") {
+            thinking.textContent = "Working on it…";
+          } else if (t === "error") {
+            throw new Error("run error");
+          }
+          // reasoning deltas and everything else: ignored for display,
+          // but they keep data flowing so the connection stays alive.
+        }
+        function pump() {
+          return reader.read().then(function (res) {
+            if (res.done) return;
+            buf += decoder.decode(res.value, { stream: true });
+            var parts = buf.split("\n");
+            buf = parts.pop();
+            parts.forEach(handleLine);
+            return pump();
+          });
+        }
+        return pump().then(function () {
+          if (buf.trim()) handleLine(buf);
+        });
       })
-      .then(function (data) {
-        var reply = (data && data.text) || "";
-        if (!reply) throw new Error("empty reply");
-        thinking.remove();
-        chatHistory.push({ role: "assistant", content: reply });
-        saveHistory();
-        bubble(reply, "her");
-        setStatus(true);
+      .then(function () {
+        if (gotText && replyText.trim()) {
+          chatHistory.push({ role: "assistant", content: replyText });
+          saveHistory();
+          setStatus(true);
+        } else {
+          thinking.remove();
+          bubble("She didn't answer — try again.", "error");
+          setStatus(false);
+        }
       })
       .catch(function (err) {
-        thinking.remove();
+        // If text already arrived, keep it — the reply is real even if
+        // the tail of the stream broke.
+        if (gotText && replyText.trim()) {
+          chatHistory.push({ role: "assistant", content: replyText });
+          saveHistory();
+          setStatus(true);
+          return;
+        }
+        if (thinking.parentNode) thinking.remove();
         var msg = (err && err.message === "rate")
           ? "Too much at once — wait a minute and try again."
           : "I couldn't reach her right now. The server or the tunnel may be down — try again in a minute.";
