@@ -350,16 +350,23 @@
     bubble(text, "me");
     var thinking = bubble("Kumwai is thinking…", "her thinking");
 
+    // Only send the last few messages, trimmed — sending the whole saved
+    // chat grows past Groq's free-tier cap and every send then fails.
+    var toSend = chatHistory.slice(-6).map(function (m) {
+      return { role: m.role, content: String(m.content).slice(0, 1200) };
+    });
+
     fetch(API + "/api/agents/" + AGENT + "/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        messages: chatHistory.slice(-MAX_HISTORY),
+        messages: toSend,
         resourceId: RESOURCE,
         threadId: THREAD
       })
     })
       .then(function (r) {
+        if (r.status === 429) throw new Error("rate");
         if (!r.ok) throw new Error("HTTP " + r.status);
         return r.json();
       })
@@ -372,9 +379,12 @@
         bubble(reply, "her");
         setStatus(true);
       })
-      .catch(function () {
+      .catch(function (err) {
         thinking.remove();
-        bubble("I couldn't reach her right now. The server or the tunnel may be down — try again in a minute.", "error");
+        var msg = (err && err.message === "rate")
+          ? "Too much at once — wait a minute and try again."
+          : "I couldn't reach her right now. The server or the tunnel may be down — try again in a minute.";
+        bubble(msg, "error");
         setStatus(false);
       })
       .finally(function () {
@@ -414,6 +424,7 @@
 
   renderAll();
   checkHealth();
+  setInterval(checkHealth, 30000);
   inputEl.focus();
 </script>
 
