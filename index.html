@@ -340,6 +340,73 @@
       .catch(function () { setStatus(false); });
   }
 
+  // Background runs: when a reply ends with a line
+  //   RUN: <workflowId>:<runId>
+  // the real answer is still being computed. The short reply names the
+  // run; this polls the run endpoint and posts the answer in short
+  // blocks when it lands, instead of one giant reply that dies at the
+  // ~100s tunnel cutoff. Polls every 5s for up to ~10 minutes.
+  var RUN_RE = /^RUN:\s*([A-Za-z0-9_-]+):([A-Za-z0-9_-]+)\s*$/m;
+  var MAX_RUN_BLOCKS = 24;
+
+  function pollRun(workflowId, runId) {
+    var working = bubble("Working on it… — run " + runId, "her thinking");
+    var tries = 0, netFails = 0, started = Date.now();
+    var timer = setInterval(function () {
+      tries++;
+      fetch(API + "/api/workflows/" + workflowId + "/runs/" + runId + "?fields=result,steps")
+        .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+        .then(function (run) {
+          netFails = 0;
+          var status = run.status || "";
+          if (status === "success") {
+            clearInterval(timer);
+            working.remove();
+            var blocks = (run.result && run.result.blocks) || [];
+            if (!blocks.length) {
+              bubble("The run finished but left no answer. The result file is workspace/runs/" + runId + "/result.md — ask me \"what did run " + runId + " find?\" and I'll read it.", "error");
+              return;
+            }
+            blocks.slice(0, MAX_RUN_BLOCKS).forEach(function (b) {
+              bubble(b, "her");
+              chatHistory.push({ role: "assistant", content: b });
+            });
+            if (blocks.length > MAX_RUN_BLOCKS) {
+              bubble("…and " + (blocks.length - MAX_RUN_BLOCKS) + " more blocks — the full answer is in workspace/runs/" + runId + "/result.md.", "her");
+            }
+            saveHistory();
+            setStatus(true);
+          } else if (status === "failed" || status === "canceled" || status === "bailed") {
+            clearInterval(timer);
+            working.remove();
+            var detail = (run.result && run.result.detail) || ("status " + status);
+            bubble("The run " + status + ": " + detail + " The trace is in workspace/runs/" + runId + ".jsonl — ask me to try again.", "error");
+          } else if (status === "suspended") {
+            clearInterval(timer);
+            working.remove();
+            bubble("The run is waiting on a permit — it needs a human approval before it can finish.", "error");
+          } else {
+            var elapsed = Math.round((Date.now() - started) / 1000);
+            working.textContent = "Working on it… — run " + runId + " (" + elapsed + "s)";
+            if (tries >= 120) {
+              clearInterval(timer);
+              working.remove();
+              bubble("Still working — the answer lands in workspace/runs/" + runId + "/result.md. Ask me \"is run " + runId + " done?\" and I'll read it.", "her");
+            }
+          }
+        })
+        .catch(function () {
+          netFails++;
+          if (netFails >= 3) {
+            clearInterval(timer);
+            working.remove();
+            bubble("Lost contact with the server — the run keeps going on its own. Ask me \"is run " + runId + " done?\" in a bit and I'll read the result.", "error");
+            setStatus(false);
+          }
+        });
+    }, 5000);
+  }
+
   var busy = false;
   function send() {
     var text = inputEl.value.trim();
@@ -354,6 +421,21 @@
     var replyEl = null;
     var replyText = "";
     var gotText = false;
+
+    // A streamed reply may end with a RUN: line naming a background run.
+    // Strip the line from what is shown and saved, then poll the run.
+    function finishReply() {
+      var m = RUN_RE.exec(replyText);
+      var clean = replyText;
+      if (m) {
+        clean = replyText.replace(RUN_RE, "").replace(/\n{3,}/g, "\n\n").trim();
+        if (replyEl) replyEl.textContent = clean;
+      }
+      chatHistory.push({ role: "assistant", content: clean });
+      saveHistory();
+      setStatus(true);
+      if (m) pollRun(m[1], m[2]);
+    }
 
     // Only send the last few messages, trimmed — sending the whole saved
     // chat grows past the model's per-minute cap and every send then fails.
@@ -425,9 +507,7 @@
       })
       .then(function () {
         if (gotText && replyText.trim()) {
-          chatHistory.push({ role: "assistant", content: replyText });
-          saveHistory();
-          setStatus(true);
+          finishReply();
         } else {
           thinking.remove();
           bubble("She didn't answer — try again.", "error");
@@ -438,9 +518,7 @@
         // If text already arrived, keep it — the reply is real even if
         // the tail of the stream broke.
         if (gotText && replyText.trim()) {
-          chatHistory.push({ role: "assistant", content: replyText });
-          saveHistory();
-          setStatus(true);
+          finishReply();
           return;
         }
         if (thinking.parentNode) thinking.remove();
