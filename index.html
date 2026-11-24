@@ -334,10 +334,26 @@
     pStatus.className = "p-status " + (live ? "live" : "down");
   }
 
+  // Health dot: one failed /health fetch must not flip the dot to
+  // Offline — a single tunnel blip or a slow phone network would
+  // flicker it. Only two consecutive failures flip it to Offline;
+  // the first success flips it straight back to Live. A 10s timeout
+  // stops a hung fetch from leaving the status stale.
+  var healthFails = 0;
   function checkHealth() {
-    fetch(API + "/health", { method: "GET" })
-      .then(function (r) { setStatus(r.ok); })
-      .catch(function () { setStatus(false); });
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () { ctrl.abort(); }, 10000);
+    fetch(API + "/health", { method: "GET", signal: ctrl.signal })
+      .then(function (r) {
+        clearTimeout(timer);
+        if (r.ok) { healthFails = 0; setStatus(true); }
+        else { healthFails++; if (healthFails >= 2) setStatus(false); }
+      })
+      .catch(function () {
+        clearTimeout(timer);
+        healthFails++;
+        if (healthFails >= 2) setStatus(false);
+      });
   }
 
   // Background runs: when a reply ends with a line
