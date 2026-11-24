@@ -2,12 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <title>Kumwai</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; height: 100%; }
+  html, body { margin: 0; padding: 0; height: 100%; overflow-x: hidden; }
   body {
     background: #0a1628;
     color: #f2f2f2;
@@ -16,6 +16,7 @@
     display: flex;
     flex-direction: column;
     height: 100dvh;
+    touch-action: manipulation;
   }
   /* ---------- chat header ---------- */
   header {
@@ -57,7 +58,7 @@
     flex-direction: column;
     gap: 10px;
   }
-  .msg { max-width: 85%; padding: 11px 14px; border-radius: 16px; line-height: 1.45; white-space: pre-wrap; word-wrap: break-word; }
+  .msg { max-width: 85%; padding: 11px 14px; border-radius: 16px; line-height: 1.45; white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere; }
   .msg.me { align-self: flex-end; background: #8a6d1a; color: #fff; border-bottom-right-radius: 4px; }
   .msg.her { align-self: flex-start; background: #16263f; border: 1px solid #24395a; border-bottom-left-radius: 4px; }
   .msg.thinking { color: #9fb2c8; font-style: italic; }
@@ -92,6 +93,16 @@
     color: #0a1628;
   }
   #send:disabled { opacity: .5; }
+  #stop {
+    flex: 0 0 auto;
+    font-size: 17px;
+    font-weight: 600;
+    padding: 0 22px;
+    border-radius: 22px;
+    border: 1px solid #e05d44;
+    background: transparent;
+    color: #e89a8a;
+  }
   /* ---------- profile sheet ---------- */
   #profile {
     position: fixed; inset: 0;
@@ -180,6 +191,7 @@
 <div id="composer">
   <input id="input" type="text" placeholder="Talk to Kumwai…" autocomplete="off" enterkeyhint="send">
   <button id="send" type="button">Send</button>
+  <button id="stop" type="button" style="display:none;">Stop</button>
 </div>
 
 <div id="profile" role="dialog" aria-label="Kumwai profile">
@@ -292,6 +304,7 @@
   var chatEl = document.getElementById("chat");
   var inputEl = document.getElementById("input");
   var sendBtn = document.getElementById("send");
+  var stopBtn = document.getElementById("stop");
   var statusEl = document.getElementById("status");
   var statusText = document.getElementById("statusText");
   var pStatus = document.getElementById("pStatus");
@@ -424,11 +437,33 @@
   }
 
   var busy = false;
+  var streamCtrl = null;
+
+  // Stop button: halts her reply mid-stream, the way stopping Geas
+  // works. Aborting the fetch ends the stream; the .catch below treats
+  // an abort as a stop (not an error) and keeps any text that already
+  // arrived. The background-run "Working on it…" wait is not stopped
+  // by this — the run keeps going on its own and its answer lands in
+  // workspace/runs/<runId>/result.md.
+  function setStreaming(on) {
+    sendBtn.style.display = on ? "none" : "";
+    stopBtn.style.display = on ? "" : "none";
+  }
+  function stopCurrent() {
+    if (streamCtrl) {
+      streamCtrl.abort();
+      streamCtrl = null;
+    }
+  }
+  stopBtn.addEventListener("click", stopCurrent);
+
   function send() {
     var text = inputEl.value.trim();
     if (!text || busy) return;
     busy = true;
     sendBtn.disabled = true;
+    setStreaming(true);
+    streamCtrl = new AbortController();
     inputEl.value = "";
     chatHistory.push({ role: "user", content: text });
     saveHistory();
@@ -466,6 +501,7 @@
     fetch(API + "/api/agents/" + AGENT + "/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal: streamCtrl.signal,
       body: JSON.stringify({
         messages: toSend,
         resourceId: RESOURCE,
@@ -531,6 +567,17 @@
         }
       })
       .catch(function (err) {
+        // Stopped by the user — not an error. Keep any text that
+        // already arrived; otherwise just say so.
+        if (err && err.name === "AbortError") {
+          if (gotText && replyText.trim()) {
+            finishReply();
+            return;
+          }
+          if (thinking.parentNode) thinking.remove();
+          bubble("Stopped.", "her");
+          return;
+        }
         // If text already arrived, keep it — the reply is real even if
         // the tail of the stream broke.
         if (gotText && replyText.trim()) {
@@ -547,6 +594,8 @@
       .finally(function () {
         busy = false;
         sendBtn.disabled = false;
+        streamCtrl = null;
+        setStreaming(false);
         inputEl.focus();
       });
   }
